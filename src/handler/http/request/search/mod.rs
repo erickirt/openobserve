@@ -234,7 +234,6 @@ pub async fn search(
     if let Ok(sql) = config::utils::query_select_utils::replace_o2_custom_patterns(&req.query.sql) {
         req.query.sql = sql;
     };
-
     req.use_cache = get_use_cache_from_request(&query);
 
     // set search event type
@@ -272,8 +271,7 @@ pub async fn search(
             {
                 req.query.start_time = req.query.end_time - max_query_range * 3600 * 1_000_000;
                 range_error = format!(
-                    "Query duration is modified due to query range restriction of {} hours",
-                    max_query_range
+                    "Query duration is modified due to query range restriction of {max_query_range} hours"
                 );
             }
         }
@@ -716,7 +714,7 @@ pub async fn build_search_request_per_field(
         .and_then(|v| base64::decode_url(v.as_ref()).ok())
         .map(|vrl| {
             if !vrl.trim().ends_with('.') {
-                format!("{} \n .", vrl)
+                format!("{vrl} \n .")
             } else {
                 vrl
             }
@@ -768,7 +766,7 @@ pub async fn build_search_request_per_field(
     let mut query = config::meta::search::Query {
         sql: decoded_sql.clone(), // Will be populated per field in the loop below
         from: 0,
-        size: config::meta::sql::MAX_LIMIT,
+        size: req.size.unwrap_or(config::meta::sql::MAX_LIMIT),
         start_time,
         end_time,
         query_fn: query_fn.clone(),
@@ -781,12 +779,12 @@ pub async fn build_search_request_per_field(
                 query.uses_zo_fn = functions::get_all_transform_keys(org_id)
                     .await
                     .iter()
-                    .any(|fn_name| decoded_sql.contains(&format!("{}(", fn_name)));
+                    .any(|fn_name| decoded_sql.contains(&format!("{fn_name}(")));
 
                 // pick up where clause from sql
                 let sql_where_from_query =
                     match SearchService::sql::pickup_where(&decoded_sql, None) {
-                        Ok(Some(v)) => format!("WHERE {}", v),
+                        Ok(Some(v)) => format!("WHERE {v}"),
                         Ok(None) => "".to_string(),
                         Err(e) => {
                             return Err(Error::other(e));
@@ -815,12 +813,12 @@ pub async fn build_search_request_per_field(
                     return Err(Error::other("Invalid filter format"));
                 }
                 let vals = columns[1].split(',').collect::<Vec<_>>().join("','");
-                let sql_where = format!("WHERE {} IN ('{}')", columns[0], vals);
+                let sql_where = format!("WHERE {} IN ('{vals}')", columns[0]);
 
                 // Define the default_sql here
-                let default_sql = format!("SELECT {} FROM \"{stream_name}\"", TIMESTAMP_COL_NAME);
+                let default_sql = format!("SELECT {TIMESTAMP_COL_NAME} FROM \"{stream_name}\"");
 
-                query.sql = format!("{} {}", default_sql, sql_where);
+                query.sql = format!("{default_sql} {sql_where}");
 
                 let can_use_distinct_stream = can_use_distinct_stream(
                     org_id,
@@ -917,13 +915,13 @@ async fn values_v1(
         .and_then(|v| base64::decode_url(v.as_ref()).ok())
         .map(|vrl_function| {
             if !vrl_function.trim().ends_with('.') {
-                format!("{} \n .", vrl_function)
+                format!("{vrl_function} \n .")
             } else {
                 vrl_function
             }
         });
 
-    let default_sql = format!("SELECT {} FROM \"{stream_name}\"", TIMESTAMP_COL_NAME);
+    let default_sql = format!("SELECT {TIMESTAMP_COL_NAME} FROM \"{stream_name}\"");
     let mut query_sql = match query.get("filter") {
         None => default_sql,
         Some(v) => {
@@ -935,7 +933,7 @@ async fn values_v1(
                     return Ok(MetaHttpResponse::bad_request("Invalid filter format"));
                 }
                 let vals = columns[1].split(',').collect::<Vec<_>>().join("','");
-                format!("{} WHERE {} IN ('{}')", default_sql, columns[0], vals)
+                format!("{default_sql} WHERE {} IN ('{vals}')", columns[0])
             }
         }
     };
@@ -955,14 +953,14 @@ async fn values_v1(
         }
     };
 
-    if let Some(v) = query.get("sql") {
-        if let Ok(sql) = base64::decode_url(v) {
-            uses_fn = functions::get_all_transform_keys(org_id)
-                .await
-                .iter()
-                .any(|fn_name| sql.contains(&format!("{}(", fn_name)));
-            query_sql = sql;
-        }
+    if let Some(v) = query.get("sql")
+        && let Ok(sql) = base64::decode_url(v)
+    {
+        uses_fn = functions::get_all_transform_keys(org_id)
+            .await
+            .iter()
+            .any(|fn_name| sql.contains(&format!("{fn_name}(")));
+        query_sql = sql;
     };
 
     // pick up where clause from sql
@@ -1065,7 +1063,7 @@ async fn values_v1(
     let sql_where = if where_str.is_empty() {
         "".to_string()
     } else {
-        format!("WHERE {}", where_str)
+        format!("WHERE {where_str}")
     };
     for field in &fields {
         let http_span = http_span.clone();

@@ -29,7 +29,7 @@ use tantivy::{
     directory::{Directory, FileHandle, OwnedBytes, error::OpenReadError},
 };
 
-use crate::service::search::tantivy::{
+use crate::service::tantivy::{
     puffin::{BlobMetadata, reader::PuffinBytesReader},
     puffin_directory::{
         EMPTY_PUFFIN_DIRECTORY, EMPTY_PUFFIN_SEG_ID, get_file_from_empty_puffin_dir_with_ext,
@@ -46,16 +46,10 @@ impl PuffinDirReader {
     pub async fn from_path(account: String, source: object_store::ObjectMeta) -> io::Result<Self> {
         let mut source = PuffinBytesReader::new(account, source);
         let Some(metadata) = source.get_metadata().await.map_err(|e| {
-            io::Error::new(
-                io::ErrorKind::Other,
-                format!("Error reading metadata from puffin file: {e}"),
-            )
+            io::Error::other(format!("Error reading metadata from puffin file: {e}"))
         })?
         else {
-            return Err(io::Error::new(
-                io::ErrorKind::Other,
-                "Error reading metadata from puffin file",
-            ));
+            return Err(io::Error::other("Error reading metadata from puffin file"));
         };
 
         let mut blobs_metadata = HashMap::new();
@@ -71,10 +65,6 @@ impl PuffinDirReader {
             source: Arc::new(source),
             blobs_metadata: Arc::new(blobs_metadata),
         })
-    }
-
-    pub fn list_files(&self) -> Vec<PathBuf> {
-        self.blobs_metadata.keys().cloned().collect()
     }
 }
 
@@ -104,29 +94,25 @@ impl HasLen for PuffinSliceHandle {
 #[async_trait::async_trait]
 impl FileHandle for PuffinSliceHandle {
     fn read_bytes(&self, _byte_range: Range<usize>) -> io::Result<OwnedBytes> {
-        Err(io::Error::new(
-            io::ErrorKind::Other,
-            format!(
-                "Error read_bytes from blob: {:?}, Not supported with PuffinSliceHandle",
-                self.path
-            ),
-        ))
+        Err(io::Error::other(format!(
+            "Error read_bytes from blob: {:?}, Not supported with PuffinSliceHandle",
+            self.path
+        )))
     }
 
     async fn read_bytes_async(&self, byte_range: Range<usize>) -> io::Result<OwnedBytes> {
         if byte_range.is_empty() {
             return Ok(OwnedBytes::empty());
         }
+        let byte_range = Range {
+            start: byte_range.start as u64,
+            end: byte_range.end as u64,
+        };
         let data = self
             .source
             .read_blob_bytes(&self.metadata, Some(byte_range.clone()))
             .await
-            .map_err(|e| {
-                io::Error::new(
-                    io::ErrorKind::Other,
-                    format!("Error reading bytes from blob: {e}"),
-                )
-            })?;
+            .map_err(|e| io::Error::other(format!("Error reading bytes from blob: {e}")))?;
         Ok(OwnedBytes::new(data.to_vec()))
     }
 }
@@ -305,9 +291,11 @@ mod tests {
     };
     use tokio::time::{Duration, Instant};
 
-    use super::*;
-    use crate::service::search::tantivy::puffin::{
-        BlobMetadata, BlobMetadataBuilder, BlobTypes, reader::PuffinBytesReader,
+    use super::{
+        super::super::puffin::{
+            BlobMetadata, BlobMetadataBuilder, BlobTypes, reader::PuffinBytesReader,
+        },
+        *,
     };
 
     // Mock data for testing
@@ -315,7 +303,7 @@ mod tests {
         object_store::ObjectMeta {
             location: file_name.into(),
             last_modified: chrono::Utc::now(),
-            size,
+            size: size as u64,
             e_tag: None,
             version: None,
         }
@@ -365,59 +353,6 @@ mod tests {
 
         let result = PuffinDirReader::from_path(account, meta).await;
         assert!(result.is_err(), "Expected error for file without metadata");
-    }
-
-    #[test]
-    fn test_puffin_dir_reader_list_files() {
-        // Create mock blobs metadata
-        let mut blobs_metadata = HashbrownHashMap::new();
-
-        let blob1 = create_mock_blob_metadata(BlobTypes::O2FstV1, 0, 100, "segment1.terms")
-            .expect("Failed to create blob metadata");
-
-        let blob2 = create_mock_blob_metadata(BlobTypes::O2TtvV1, 100, 200, "segment1.pos")
-            .expect("Failed to create blob metadata");
-
-        blobs_metadata.insert(PathBuf::from("segment1.terms"), Arc::new(blob1));
-        blobs_metadata.insert(PathBuf::from("segment1.pos"), Arc::new(blob2));
-
-        // Create a mock PuffinBytesReader
-        let mock_reader = PuffinBytesReader::new(
-            "test_account".to_string(),
-            create_mock_object_meta("test.puffin", 1024),
-        );
-
-        let reader = PuffinDirReader {
-            source: Arc::new(mock_reader),
-            blobs_metadata: Arc::new(blobs_metadata),
-        };
-
-        let files = reader.list_files();
-        assert_eq!(files.len(), 2);
-        assert!(files.contains(&PathBuf::from("segment1.terms")));
-        assert!(files.contains(&PathBuf::from("segment1.pos")));
-    }
-
-    #[test]
-    fn test_puffin_dir_reader_clone() {
-        let mut blobs_metadata = HashbrownHashMap::new();
-        let blob = create_mock_blob_metadata(BlobTypes::O2FstV1, 0, 100, "test_file.terms")
-            .expect("Failed to create blob metadata");
-
-        blobs_metadata.insert(PathBuf::from("test_file.terms"), Arc::new(blob));
-
-        let mock_reader = PuffinBytesReader::new(
-            "test_account".to_string(),
-            create_mock_object_meta("test.puffin", 1024),
-        );
-
-        let reader = PuffinDirReader {
-            source: Arc::new(mock_reader),
-            blobs_metadata: Arc::new(blobs_metadata),
-        };
-
-        let cloned_reader = reader.clone();
-        assert_eq!(reader.list_files(), cloned_reader.list_files());
     }
 
     #[test]
@@ -865,50 +800,5 @@ mod tests {
             .build();
         assert!(result.is_err());
         assert_eq!(result.unwrap_err(), "offset is required");
-    }
-
-    #[test]
-    fn test_concurrent_access() {
-        // Test that the reader can be safely shared across threads
-        let mut blobs_metadata = HashbrownHashMap::new();
-        let blob = create_mock_blob_metadata(BlobTypes::O2FstV1, 0, 100, "shared_file.terms")
-            .expect("Failed to create blob metadata");
-
-        blobs_metadata.insert(PathBuf::from("shared_file.terms"), Arc::new(blob));
-
-        let mock_reader = PuffinBytesReader::new(
-            "test_account".to_string(),
-            create_mock_object_meta("test.puffin", 1024),
-        );
-
-        let reader = Arc::new(PuffinDirReader {
-            source: Arc::new(mock_reader),
-            blobs_metadata: Arc::new(blobs_metadata),
-        });
-
-        let mut handles = vec![];
-
-        // Spawn multiple threads that access the reader
-        for i in 0..10 {
-            let reader_clone = reader.clone();
-            let handle = std::thread::spawn(move || {
-                let files = reader_clone.list_files();
-                assert_eq!(files.len(), 1);
-                assert!(files.contains(&PathBuf::from("shared_file.terms")));
-
-                let path = PathBuf::from("shared_file.terms");
-                let exists = reader_clone.exists(&path);
-                assert!(exists.is_ok_and(|exists| exists), "Expected file to exist");
-
-                i // Return thread index for verification
-            });
-            handles.push(handle);
-        }
-
-        // Wait for all threads to complete
-        for (i, handle) in handles.into_iter().enumerate() {
-            let result = handle.join().expect("Thread panicked");
-            assert_eq!(result, i);
-        }
     }
 }

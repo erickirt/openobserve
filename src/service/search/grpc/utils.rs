@@ -13,5 +13,26 @@
 // You should have received a copy of the GNU Affero General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-pub mod puffin;
-pub mod puffin_directory;
+use std::sync::Arc;
+
+use arrow_schema::{DataType, Field, Schema};
+use config::get_config;
+
+pub fn change_schema_to_utf8_view(schema: Schema) -> Schema {
+    if !get_config().common.utf8_view_enabled {
+        return schema;
+    }
+
+    let fields = schema
+        .fields()
+        .iter()
+        .map(|f| {
+            if f.data_type() == &DataType::Utf8 {
+                Arc::new(Field::new(f.name(), DataType::Utf8View, f.is_nullable()))
+            } else {
+                f.clone()
+            }
+        })
+        .collect::<Vec<_>>();
+    Schema::new(fields)
+}

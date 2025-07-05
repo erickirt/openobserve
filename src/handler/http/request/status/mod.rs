@@ -62,7 +62,6 @@ use {
     o2_openfga::config::{
         get_config as get_openfga_config, refresh_config as refresh_openfga_config,
     },
-    std::io::ErrorKind,
 };
 
 use crate::{
@@ -75,10 +74,8 @@ use crate::{
     },
     service::{
         db,
-        search::{
-            datafusion::{storage::file_statistics_cache, udf::DEFAULT_FUNCTIONS},
-            tantivy::puffin_directory::reader_cache,
-        },
+        search::datafusion::{storage::file_statistics_cache, udf::DEFAULT_FUNCTIONS},
+        tantivy::puffin_directory::reader_cache,
     },
 };
 
@@ -136,6 +133,7 @@ struct ConfigResponse<'a> {
     max_query_range: i64,
     ai_enabled: bool,
     dashboard_placeholder: String,
+    dashboard_show_symbol_enabled: bool,
 }
 
 #[derive(Serialize)]
@@ -328,7 +326,7 @@ pub async fn zo_config() -> Result<HttpResponse, Error> {
         usage_publish_interval: cfg.common.usage_publish_interval,
         ingestion_url: cfg.common.ingestion_url.to_string(),
         #[cfg(feature = "enterprise")]
-        aggregation_cache_enabled: cfg.disk_cache.aggregation_cache_enabled,
+        aggregation_cache_enabled: cfg.common.aggregation_cache_enabled,
         min_auto_refresh_interval: cfg.common.min_auto_refresh_interval,
         query_default_limit: cfg.limit.query_default_limit,
         max_dashboard_series: cfg.limit.max_dashboard_series,
@@ -338,6 +336,7 @@ pub async fn zo_config() -> Result<HttpResponse, Error> {
         max_query_range: cfg.limit.default_max_query_range_days * 24,
         ai_enabled,
         dashboard_placeholder: cfg.common.dashboard_placeholder.to_string(),
+        dashboard_show_symbol_enabled: cfg.common.dashboard_show_symbol_enabled,
     }))
 }
 
@@ -400,8 +399,14 @@ pub async fn cache_status() -> Result<HttpResponse, Error> {
         json::json!({"reader_cache": reader_cache::GLOBAL_CACHE.clone().len()}),
     );
 
-    let consistent_hashing = cluster::print_consistent_hash().await;
-    stats.insert("CONSISTENT_HASHING", json::json!(consistent_hashing));
+    #[cfg(feature = "enterprise")]
+    let (total_count, expired_count) = crate::service::search::cardinality::get_cache_stats().await;
+    #[cfg(not(feature = "enterprise"))]
+    let (total_count, expired_count) = (0, 0);
+    stats.insert(
+        "CARDINALITY",
+        json::json!({"total_count": total_count, "expired_count": expired_count}),
+    );
 
     Ok(HttpResponse::Ok().json(stats))
 }
@@ -482,7 +487,7 @@ pub async fn redirect(req: HttpRequest) -> Result<HttpResponse, Error> {
     let code = match query.get("code") {
         Some(code) => code,
         None => {
-            return Err(Error::new(ErrorKind::Other, "no code in request"));
+            return Err(Error::other("no code in request"));
         }
     };
     let mut audit_message = AuditMessage {
@@ -510,7 +515,7 @@ pub async fn redirect(req: HttpRequest) -> Result<HttpResponse, Error> {
                 // Bad Request
                 audit_message.response_meta.http_response_code = 400;
                 audit(audit_message).await;
-                return Err(Error::new(ErrorKind::Other, "invalid state in request"));
+                return Err(Error::other("invalid state in request"));
             }
         },
 
@@ -518,7 +523,7 @@ pub async fn redirect(req: HttpRequest) -> Result<HttpResponse, Error> {
             // Bad Request
             audit_message.response_meta.http_response_code = 400;
             audit(audit_message).await;
-            return Err(Error::new(ErrorKind::Other, "no state in request"));
+            return Err(Error::other("no state in request"));
         }
     };
 
@@ -541,15 +546,14 @@ pub async fn redirect(req: HttpRequest) -> Result<HttpResponse, Error> {
             match token_ver {
                 Ok(res) => {
                     // check for service accounts , do not to allow login
-                    if let Some(db_user) = db::user::get_user_by_email(&res.0.user_email).await {
-                        if db_user
+                    if let Some(db_user) = db::user::get_user_by_email(&res.0.user_email).await
+                        && db_user
                             .organizations
                             .iter()
                             .any(|org| org.role.eq(&UserRole::ServiceAccount))
-                        {
-                            return Ok(HttpResponse::Unauthorized()
-                                .json("Service accounts are not allowed to login".to_string()));
-                        }
+                    {
+                        return Ok(HttpResponse::Unauthorized()
+                            .json("Service accounts are not allowed to login".to_string()));
                     }
 
                     audit_message.user_email = res.0.user_email.clone();
@@ -590,7 +594,7 @@ pub async fn redirect(req: HttpRequest) -> Result<HttpResponse, Error> {
             // store session_id in cluster co-ordinator
             let _ = crate::service::session::set_session(&session_id, &access_token).await;
 
-            let access_token = format!("session {}", session_id);
+            let access_token = format!("session {session_id}");
 
             let tokens = json::to_string(&AuthTokens {
                 access_token,
@@ -693,7 +697,7 @@ async fn refresh_token_with_dex(req: actix_web::HttpRequest) -> HttpResponse {
             // store session_id in cluster co-ordinator
             let _ = crate::service::session::set_session(&session_id, &access_token).await;
 
-            let access_token = format!("session {}", session_id);
+            let access_token = format!("session {session_id}");
 
             let tokens = json::to_string(&AuthTokens {
                 access_token,

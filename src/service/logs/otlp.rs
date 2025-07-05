@@ -229,12 +229,12 @@ pub async fn handle_request(
                         streams_need_original_map
                             .get(&stream_name)
                             .is_some_and(|v| *v)
-                            .then_some(rec.to_string())
+                            .then(|| rec.to_string())
                     } else {
                         // 3. with pipeline, storing original as long as streams_need_original_set
                         //    is not empty
                         // because not sure the pipeline destinations
-                        store_original_when_pipeline_exists.then_some(rec.to_string())
+                        store_original_when_pipeline_exists.then(|| rec.to_string())
                     }
                 } else {
                     None // `item` won't be flattened, no need to store original
@@ -265,12 +265,9 @@ pub async fn handle_request(
                     if streams_need_original_map
                         .get(&stream_name)
                         .is_some_and(|v| *v)
-                        && original_data.is_some()
+                        && let Some(original_data) = original_data
                     {
-                        local_val.insert(
-                            ORIGINAL_DATA_COL_NAME.to_string(),
-                            original_data.unwrap().into(),
-                        );
+                        local_val.insert(ORIGINAL_DATA_COL_NAME.to_string(), original_data.into());
 
                         let record_id = crate::service::ingestion::generate_record_id(
                             org_id,
@@ -322,13 +319,10 @@ pub async fn handle_request(
         {
             Err(e) => {
                 log::error!(
-                    "[Pipeline] for stream {}/{}: Batch execution error: {}.",
-                    org_id,
-                    stream_name,
-                    e
+                    "[Pipeline] for stream {org_id}/{stream_name}: Batch execution error: {e}."
                 );
                 stream_status.status.failed += records_count as u32;
-                stream_status.status.error = format!("Pipeline batch execution error: {}", e);
+                stream_status.status.error = format!("Pipeline batch execution error: {e}");
                 metrics::INGEST_ERRORS
                     .with_label_values(&[
                         org_id,
